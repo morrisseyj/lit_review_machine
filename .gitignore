@@ -1,0 +1,16 @@
+# Ignore compiled Python files
+*.pyc
+__pycache__/
+unpaywall_cache
+
+# Ignore virtual environments
+.venv/
+venv/
+
+# Ignore secrets
+.env
+
+# Ignore data and outputs
+data/docs/
+data/pickles/
+outputs/docx/
