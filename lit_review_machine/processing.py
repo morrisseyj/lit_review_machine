@@ -1,6 +1,6 @@
 # Import the two projevct modules
-from outputs import QuestionState, Summaries
-from prompts import Prompts
+from lit_review_machine.outputs import QuestionState, Summaries
+from lit_review_machine.prompts import Prompts
 
 # Import other libraries
 import json
@@ -29,12 +29,8 @@ from sklearn.metrics import silhouette_score
 import hdbscan
 from docx import Document
 
-
 STATE_FILE_LOCATION = os.path.join(os.getcwd(), "data", "pickles", "state.pkl")
   
-from typing import Optional, List
-import pandas as pd
-import numpy as np
 
 def validate_format(
     state: Optional["QuestionState"], 
@@ -106,7 +102,7 @@ class ScholarSearchString:
         questions: List[str],
         llm_client: Any,
         num_prompts: int = 10,
-        search_engine: str = "Google Scholar",
+        search_engine: str = "Semantic Scholar",
         llm_model: str = "gpt-4.1",
         state: Optional[QuestionState] = None,
         messages: Optional[List[List[Dict[str, str]]]] = None,
@@ -118,7 +114,7 @@ class ScholarSearchString:
             questions (List[str]): List of research questions.
             llm_client (Any): LLM API client instance (e.g., OpenAI client).
             num_prompts (int, optional): Number of search prompts per question. Defaults to 10.
-            search_engine (str, optional): Search engine context. Defaults to "Google Scholar".
+            search_engine (str, optional): Search engine context. Defaults to "Semantic Scholar".
             llm_model (str, optional): LLM model name. Defaults to "gpt-4.1".
             state (Optional[QuestionState], optional): Existing QuestionState object.
             messages (Optional[List[List[Dict[str, str]]]], optional):
@@ -131,7 +127,7 @@ class ScholarSearchString:
         self.llm_model: str = llm_model
 
         # Create or reuse a QuestionState object
-        self.state: QuestionState = state or QuestionState(self._make_state())
+        self.state: QuestionState = state or QuestionState([self._make_state()])
 
         # Messages are generated later by `message_maker`
         self.messages: Optional[List[List[Dict[str, str]]]] = messages
@@ -191,8 +187,9 @@ class ScholarSearchString:
         Returns:
             List[str]: Generated search strings across all questions.
         """
+        # Ensure messages exist
         if self.messages is None:
-            raise RuntimeError("Messages must be generated first with `message_maker()`.")
+            self.message_maker()
 
         # Initialize empty results dataframe
         search_strings_df = pd.DataFrame(columns=["question_id", "search_string"])
@@ -211,7 +208,8 @@ class ScholarSearchString:
 
             # Parse JSON response
             response_data: Dict[str, List[str]] = json.loads(response.choices[0].message.content)
-            question_id, search_strings = list(response_data.items())[0]
+            # Use internal question_id instead of LLM key
+            llm_prompts = list(response_data.values())[0]
 
             # Append results to dataframe
             search_strings_df = pd.concat(
@@ -219,8 +217,8 @@ class ScholarSearchString:
                     search_strings_df,
                     pd.DataFrame(
                         {
-                            "question_id": [question_id] * len(search_strings),
-                            "search_string": search_strings,
+                            "question_id": [question_id] * len(llm_prompts),
+                            "search_string": llm_prompts,
                         }
                     ),
                 ],
@@ -257,7 +255,6 @@ class AcademicLit:
     def __init__(
         self,
         sch: Any = None,
-        num_results: int = 50,
         semantic_scholar_api_key: Optional[str] = None,
         state: Optional[QuestionState] = None,
         search_strings: Optional[pd.DataFrame] = None,
@@ -267,7 +264,6 @@ class AcademicLit:
 
         Args:
             sch (Any, optional): Semantic Scholar client instance. Will create default if None.
-            num_results (int, optional): Max papers per search string. Defaults to 50.
             semantic_scholar_api_key (Optional[str], optional): API key to avoid rate limits.
             state (Optional[QuestionState], optional): Pre-existing QuestionState with search_strings.
             search_strings (Optional[pd.DataFrame], optional): Tidy DataFrame with columns
@@ -279,13 +275,7 @@ class AcademicLit:
             from semanticscholar import SemanticScholar
             sch = SemanticScholar()
         self.sch = sch
-
-        # Enforce max results limit
-        if num_results > 100:
-            raise ValueError("num_results can't be more than 100.")
-        self.num_results = num_results
-
-        
+      
         self.state = validate_format(
             state = state, 
             injected_value=search_strings, 
@@ -312,9 +302,11 @@ class AcademicLit:
         else:
             self.semantic_scholar_api_key = semantic_scholar_api_key
 
-    def get_papers(self) -> pd.DataFrame:
+    def get_papers(self, num_results = 20) -> pd.DataFrame:
         """
         Retrieve papers from Semantic Scholar for each search string in the state.
+
+        num_results: Max papers per search string. Defaults to 50. Maximum allowed is 100
 
         Returns:
             pd.DataFrame: DataFrame containing retrieved papers with metadata.
@@ -322,6 +314,10 @@ class AcademicLit:
         Raises:
             RuntimeError: If too many requests are sent or exponential backoff fails.
         """
+        # Enforce max results limit
+        if num_results > 100:
+            raise ValueError("num_results can't be more than 100.")
+        
         pubs = []
         search_string_count = 0
 
@@ -340,7 +336,8 @@ class AcademicLit:
 
             while retry_counter < 10:
                 try:
-                    semantic_results = self.sch.search_paper(search_string, limit=self.num_results)
+                    semantic_results = self.sch.search_paper(search_string, limit=num_results)
+                    print(f"processing results for paper {search_string_count}")
 
                     for result in semantic_results:
                         authors = []
@@ -362,6 +359,7 @@ class AcademicLit:
                     break  # Exit retry loop if successful
 
                 except Exception as e:
+                    print("Retrieval failed attempting retry...")
                     if "429" in str(e):
                         print("429 error, retrying...")
                         time.sleep(back_off)
@@ -444,8 +442,14 @@ class DOI:
             return []
 
         df = self.state.insights[["paper_title", "paper_author", "paper_date"]].copy()
-        search_string = df.apply(lambda row: ' '.join(row.values.astype(str)), axis=1)
-        return search_string.to_list()
+        df["search_string"] = (
+        df["paper_title"].astype(str) + " " +
+        df["paper_author"].astype(str) + " " +
+        df["paper_date"].astype(str)
+        )
+
+        search_string = df["search_string"].tolist()
+        return search_string
 
     @staticmethod
     def call_alex(search_string: str) -> Optional[str]:
@@ -643,9 +647,8 @@ class GreyLiterature:
             response: Any = self.llm_client.responses.create(
                 model=self.ai_model,
                 input=prompt,
-                tools=[{"type": "web_search_preview"}],
-                response_format={"type": "json_object"}
-            )
+                tools=[{"type": "web_search_preview"}])
+        
         except Exception as e:
             print(f"Call to Open AI failed. Error: {e}")
             return None
@@ -653,17 +656,34 @@ class GreyLiterature:
         # Parse JSON output from the LLM
         try:
             response_dict: Dict[str, Any] = json.loads(response.output_text)
-        except Exception as e:
-            print(
-                f"Open AI failed to return a valid JSON. Error: {e}. "
-                "self.grey_literature remains unpopulated. To populate it you will need to re-run self.get_grey_lit(). "
-                "Note this is an expensive call. Make sure your prompt is giving the correct instructions to return a JSON."
+        except json.JSONDecodeError:
+            # fallback
+            sys_prompt = Prompts.grey_literature_format_check()
+            user_prompt = response.output_text
+            messages = [
+                {"role": "system", "content": sys_prompt}, 
+                {"role": "user", "content": user_prompt}
+            ]
+
+            valid_json_response = self.llm_client.chat.completions.create(
+                model="gpt-4o",
+                messages=messages, 
+                response_format={"type": "json_object"}
             )
-            return None
+
+            try:
+                response_dict = json.loads(valid_json_response.choices[0].message.content)
+            except Exception as e:
+                print( 
+                    f"Open AI failed to return a valid JSON. Error: {e}. "
+                    "Efforts to resolve this issue failed. "
+                    "self.grey_literature remains unpopulated. To populate it you will need to re-run self.get_grey_lit(). "
+                    "Note this is an expensive call. Make sure your prompt is giving the correct instructions to return a JSON."
+                )
+                return None
 
         # Convert LLM responses into DataFrames
-        llm_responses: List[pd.DataFrame] = [pd.DataFrame(value) for value in response_dict.values()]
-        grey_lit: pd.DataFrame = pd.concat(llm_responses, ignore_index=True)
+        grey_lit: pd.DataFrame = pd.DataFrame(response_dict)
 
         # Prefix paper_id with "grey_lit_" to distinguish from other IDs
         grey_lit["paper_id"] = [f"grey_lit_{i}" for i in grey_lit["paper_id"]]

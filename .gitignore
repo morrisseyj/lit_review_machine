@@ -13,4 +13,4 @@ venv/
 # Ignore data and outputs
 data/docs/
 data/pickles/
-outputs/docx/
+outputs/

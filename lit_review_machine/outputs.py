@@ -1,5 +1,5 @@
 # Import project libraries
-from prompts import Prompts
+from lit_review_machine.prompts import Prompts
 
 # Import general libraries
 import pandas as pd
@@ -8,8 +8,7 @@ import pickle
 from typing import Optional, Dict, Any, List, Union
 import os
 import json
-
-
+import ast
 import os
 import pickle
 from typing import List, Optional, Union
@@ -84,6 +83,37 @@ class QuestionState:
         with open(save_location, "wb") as file:
             pickle.dump(self, file)
 
+    def write_to_csv(
+        self,
+        folder_path: str = os.path.join(os.getcwd(), "outputs"),
+        write_insights: bool = True,
+        write_full_text: bool = True,
+        write_chunks: bool = True
+    ) -> None:
+        """
+        Write selected QuestionState dataframes to CSV files in a folder.
+
+        Args:
+            folder_path (str): Folder where CSV files will be saved. Default is
+                               'question_state_export'.
+            write_insights (bool): If True, writes self.insights.csv
+            write_full_text (bool): If True, writes self.full_text.csv
+            write_chunks (bool): If True, writes self.chunks.csv
+        """
+        os.makedirs(folder_path, exist_ok=True)
+
+        if write_insights:
+            insights_file = os.path.join(folder_path, "insights.csv")
+            self.insights.to_csv(insights_file, index=False)
+
+        if write_full_text:
+            full_text_file = os.path.join(folder_path, "full_text.csv")
+            self.full_text.to_csv(full_text_file, index=False)
+
+        if write_chunks:
+            chunks_file = os.path.join(folder_path, "chunks.csv")
+            self.chunks.to_csv(chunks_file, index=False)
+
     @classmethod
     def load_from_pickle(cls, filepath: str) -> "QuestionState":
         """
@@ -110,26 +140,69 @@ class QuestionState:
 
         return obj
 
+    @staticmethod
+    def _strict_literal_eval(value):
+        if pd.isna(value):
+            return []
+        try:
+            return ast.literal_eval(value)
+        except (ValueError, TypeError, SyntaxError) as e:
+            # Raise a specific error for malformed literal
+            raise ValueError(
+                f"Fatal Error: Failed to evaluate literal in 'paper_author' column. "
+                f"Ensure ALL entries are strictly formatted as a Python list of strings, "
+                f"e.g., ['Author A', 'Author B']. The offending value was: '{value}'. "
+                "An easy way to do this is to pass the column from your csv to an LLM (web version is fine) and ask it to format it correctly before pasting back."
+                f"Original error: {e.__class__.__name__}"
+            ) from e
+
     @classmethod
-    def load_from_csv(cls, filepath: str) -> "QuestionState":
+    def load_from_csv(cls, filepath: str, encoding="utf-8") -> "QuestionState":
         """
-        Load a QuestionState object from a CSV file containing literature data.
-
-        Args:
-            filepath (str): Path to the CSV file containing the insights dataframe.
-
-        Returns:
-            QuestionState: Initialized state object with insights loaded from CSV
-                           and full_text and chunks initialized as empty.
+        Loads data robustly. Handles encoding error with custom message.
+        Handles 'paper_author' literal format error with custom message, no local function.
         """
         if not os.path.exists(filepath):
             raise FileNotFoundError(f"No CSV found at {filepath}")
 
-        df: pd.DataFrame = pd.read_csv(filepath)
+        # --- 1. Attempt File Read with Encoding Error Handling ---
+        try:
+            df: pd.DataFrame = pd.read_csv(filepath, encoding=encoding)
+        except UnicodeDecodeError as e:
+            # Custom error for the user to fix the encoding argument
+            raise UnicodeDecodeError(
+                f"Failed to read CSV with encoding '{encoding}'. "
+                f"Please check your file's true encoding (e.g., 'cp1252' for ANSI) "
+                f"and try again by setting the 'encoding' parameter. Original error: {e}"
+            ) from e
+        
+        # --- 2. Minimal Validation ---
+        required_columns = ["search_string_id"]
+        missing_columns = [col for col in required_columns if col not in df.columns]
+        if missing_columns:
+            raise ValueError(
+                f"The CSV is missing required columns for insights: {missing_columns}"
+            )
 
-        # Pass the DataFrame as the first element of a list to the constructor
+        # --- 3. Strict Literal Evaluation with Custom Error Catch ---
+        if "paper_author" in df.columns:
+            try:
+                # Apply the lambda directly.
+                # If ast.literal_eval fails for any row, the exception will propagate here.
+                df["paper_author"] = df["paper_author"].apply(
+                    lambda x: ast.literal_eval(x) if pd.notna(x) else []
+                )
+            except (ValueError, TypeError, SyntaxError) as e:
+                # Catch the exception that bubbled up from the .apply() method and re-raise the custom message.
+                raise ValueError(
+                    f"Fatal Error: Failed to evaluate literal in 'paper_author' column. "
+                    f"Ensure ALL non-empty entries are strictly formatted as a Python list of strings, "
+                    f"e.g., ['Author A', 'Author B']. "
+                    "An easy way to do this is to pass the entire 'paper_author' column data to an LLM (web version is fine) and ask it to format it correctly before pasting back. "
+                    f"Original error: {e.__class__.__name__}"
+                ) from e
+
         return cls(state=[df])
-    
 
 class Summaries:
     def __init__(
