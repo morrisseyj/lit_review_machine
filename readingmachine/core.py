@@ -6945,7 +6945,7 @@ class Summarize:
             self.summary_state.save()
             return new_schema
 
-    def _validate_and_cast_theme_ids(self, df, allowed_ids):
+    def _validate_and_cast_theme_ids(self, df, allowed_ids, prompt, output):
         """
         Validate and normalize LLM-generated theme assignments.
 
@@ -7007,6 +7007,8 @@ class Summarize:
         if invalid_ids:
             raise ValueError(
                 f"Invalid theme_id(s) returned by LLM: {invalid_ids}. "
+                f"Prompt:\n\n{prompt}\n\n"
+                f"Outout:\n\n{output}\n\n"
                 f"Allowed IDs: {sorted(allowed_set)}"
             )
 
@@ -7220,6 +7222,23 @@ class Summarize:
                 ["theme_id", "theme_label", "theme_description", "instructions"]
             ].to_json(orient="records", indent=2)
 
+
+            # Get valid theme IDs for this question.
+            # The prompt-validation code uses integers, while the structured output
+            # schema expects theme IDs to be returned as strings.
+            # Get the inputs to the sys prompt call: the list of allowd theme_ids to tag to, the other theme id and the conflict theme id
+            allowed_theme_ids = q_schema_df["theme_id"].astype(int).tolist()
+            # Convert the allowed theme IDs to strings for use in the JSON schema
+            allowed_theme_id_strings = [
+                str(theme_id)
+                for theme_id in allowed_theme_ids
+            ]
+            # Get the rest of the inputs to the sys prompt call: the other theme id and the conflict theme id
+            other_theme_rows = q_schema_df[q_schema_df["theme_label"].str.lower() == "other"]["theme_id"].astype(str)
+            other_theme_id = other_theme_rows.iloc[0] if not other_theme_rows.empty else None
+            conflicts_theme_rows = q_schema_df[q_schema_df["theme_label"].str.lower() == "conflict"]["theme_id"].astype(str)
+            conflicts_theme_id = conflicts_theme_rows.iloc[0] if not conflicts_theme_rows.empty else None
+
             # Pre-build JSON schema (explicit)
             json_schema = {
                 "name": "insight_to_theme_mapper",
@@ -7232,13 +7251,22 @@ class Summarize:
                             "items": {
                                 "type": "object",
                                 "properties": {
-                                    "insight_id": {"type": "string"},
+                                    "insight_id": {
+                                        "type": "string"
+                                    },
                                     "theme_id": {
                                         "type": "array",
-                                        "items": {"type": "string"}
+                                        "items": {
+                                            "type": "string",
+                                            "enum": allowed_theme_id_strings
+                                        },
+                                        "minItems": 1
                                     }
                                 },
-                                "required": ["insight_id", "theme_id"],
+                                "required": [
+                                    "insight_id",
+                                    "theme_id"
+                                ],
                                 "additionalProperties": False
                             }
                         }
@@ -7278,12 +7306,7 @@ class Summarize:
                     for row in batch_df.itertuples()
                 )
 
-                # Get the inputs to the sys prompt call: the list of allowd theme_ids to tag to, the other theme id and the conflict theme id
-                allowed_theme_ids = q_schema_df["theme_id"].astype(int).tolist()
-                other_theme_rows = q_schema_df[q_schema_df["theme_label"].str.lower() == "other"]["theme_id"].astype(str)
-                other_theme_id = other_theme_rows.iloc[0] if not other_theme_rows.empty else None
-                conflicts_theme_rows = q_schema_df[q_schema_df["theme_label"].str.lower() == "conflict"]["theme_id"].astype(str)
-                conflicts_theme_id = conflicts_theme_rows.iloc[0] if not conflicts_theme_rows.empty else None
+                
 
                 sys_prompt = Prompts().theme_map_to_schema(
                     allowed_ids=allowed_theme_ids,
@@ -7322,7 +7345,9 @@ class Summarize:
                 # Validate that all returned theme_ids are valid
                 batch_results_df = self._validate_and_cast_theme_ids(
                     batch_results_df,
-                    allowed_theme_ids
+                    allowed_theme_ids, 
+                    prompt=user_prompt,
+                    output=response
                 )
 
                 mapped_insights_df_list.append(batch_results_df)
