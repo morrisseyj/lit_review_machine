@@ -1,7 +1,7 @@
 ReadingMachine Public Evaluation
 ================
 James Morrissey
-2026-08-03
+2026-08-10
 
 # ReadingMachine Evaluation Archive
 
