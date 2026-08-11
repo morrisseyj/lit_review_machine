@@ -5953,7 +5953,7 @@ class Summarize:
             }
 
         # Generate the repair instructions for this schema
-        response = utils.call_chat_completion(
+        response, error = utils.call_chat_completion(
             sys_prompt=sys_prompt,
             user_prompt=user_prompt,
             llm_client=self.llm_client,
@@ -5961,7 +5961,11 @@ class Summarize:
             fall_back=fall_back,
             return_json=True,
             json_schema=json_schema,
+            return_with_error=True
         )
+
+        if error:
+            print(f"Error during LLM schema repair plan generation:\n\n {error}.\n\n Returning empty repair plan.")
 
 
         repair_plan = response.get("repair_plan", {
@@ -6512,19 +6516,69 @@ class Summarize:
                     # Generate the full history of the theme summaries and schema rules for this question so that i can pass it to the model
                     full_history = []
 
-                    for i, (s, p) in enumerate(zip(self.summary_state.theme_schema_list, self.summary_state.populated_theme_list)):
+                    current_iteration = len(self.summary_state.theme_schema_list) - 1
+
+                    for i, (s, p) in enumerate(
+                        zip(
+                            self.summary_state.theme_schema_list,
+                            self.summary_state.populated_theme_list
+                        )
+                    ):
                         merged_schema_pop_df = (
                             s[s["question_id"] == question_id]
-                            .merge(p[["thematic_summary", "theme_id", "question_id"]], 
-                                    how ="left", 
-                                    on=["question_id", "theme_id"])
-                            .assign(completeness_check=lambda x: x["thematic_summary"].apply(lambda y: "fail" if pd.notna(y) and "--- FAILED BATCH SUMMARIES ---" in y else "pass"))
+                            .merge(
+                                p[["thematic_summary", "theme_id", "question_id"]],
+                                how="left",
+                                on=["question_id", "theme_id"]
+                            )
+                            .assign(
+                                completeness_check=lambda x: x["thematic_summary"].apply(
+                                    lambda y: (
+                                        "fail"
+                                        if pd.notna(y)
+                                        and "--- FAILED BATCH SUMMARIES ---" in y
+                                        else "pass"
+                                    )
+                                )
+                            )
                             .assign(iteration=i)
-                            .assign(word_count=lambda x: x["thematic_summary"].str.split("--- FAILED BATCH SUMMARIES ---").str[0].str.split().str.len().fillna(0).astype(int))
-                            .assign(word_count=lambda x: np.where(x["thematic_summary"].str.contains("--- FAILED BATCH SUMMARIES ---", na=False), None, x["word_count"]))
-                            .assign(schema_has_failures=lambda x: (x["completeness_check"] == "fail").any())
-                            .assign(is_current_iteration=lambda x: x["iteration"] == len(self.summary_state.theme_schema_list) - 1)
+                            .assign(
+                                word_count=lambda x: (
+                                    x["thematic_summary"]
+                                    .str.split("--- FAILED BATCH SUMMARIES ---")
+                                    .str[0]
+                                    .str.split()
+                                    .str.len()
+                                    .fillna(0)
+                                    .astype(int)
+                                )
+                            )
+                            .assign(
+                                word_count=lambda x: np.where(
+                                    x["thematic_summary"].str.contains(
+                                        "--- FAILED BATCH SUMMARIES ---",
+                                        na=False
+                                    ),
+                                    None,
+                                    x["word_count"]
+                                )
+                            )
+                            .assign(
+                                schema_has_failures=lambda x: (
+                                    x["completeness_check"] == "fail"
+                                ).any()
+                            )
+                            .assign(
+                                is_current_iteration=lambda x: (
+                                    x["iteration"] == current_iteration
+                                )
+                            )
                         )
+
+                        # Keep full populated content only for the current schema.
+                        if i != current_iteration:
+                            merged_schema_pop_df["thematic_summary"] = None
+
                         full_history.append(merged_schema_pop_df)
 
                     full_history_df = pd.concat(full_history, ignore_index=True)
