@@ -6570,14 +6570,11 @@ class Summarize:
                             )
                             .assign(
                                 is_current_iteration=lambda x: (
-                                    x["iteration"] == current_iteration
+                                    x["iteration"]
+                                    == len(self.summary_state.theme_schema_list) - 1
                                 )
                             )
                         )
-
-                        # Keep full populated content only for the current schema.
-                        if i != current_iteration:
-                            merged_schema_pop_df["thematic_summary"] = None
 
                         full_history.append(merged_schema_pop_df)
 
